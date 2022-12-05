@@ -8,6 +8,7 @@
 #include "common/tusb_common.h"
 
 #include "pico.h"
+#include "pico/sync.h"
 #include "hardware/structs/usb.h"
 #include "hardware/irq.h"
 #include "hardware/resets.h"
@@ -25,6 +26,9 @@
 #else
 #define __tusb_irq_path_func(x) x
 #endif
+
+#define usb_hw_set hw_set_alias(usb_hw)
+#define usb_hw_clear hw_clear_alias(usb_hw)
 
 #define pico_info(...)  TU_LOG(2, __VA_ARGS__)
 #define pico_trace(...) TU_LOG(3, __VA_ARGS__)
@@ -79,6 +83,16 @@ void rp2040_usb_init(void);
 void hw_endpoint_xfer_start(struct hw_endpoint *ep, uint8_t *buffer, uint16_t total_len);
 bool hw_endpoint_xfer_continue(struct hw_endpoint *ep);
 void hw_endpoint_reset_transfer(struct hw_endpoint *ep);
+void hw_endpoint_start_next_buffer(struct hw_endpoint *ep);
+
+extern critical_section_t ep_lock;
+
+TU_ATTR_ALWAYS_INLINE static inline void hw_endpoint_lock_update(int delta) {
+  if (delta > 0)
+    critical_section_enter_blocking(&ep_lock);
+  else if (delta < 0)
+    critical_section_exit(&ep_lock);
+}
 
 void _hw_endpoint_buffer_control_update32(struct hw_endpoint *ep, uint32_t and_mask, uint32_t or_mask);
 
