@@ -246,11 +246,32 @@ static void __tusb_irq_path_func(dcd_rp2040_irq)(void)
 {
     uint32_t const status = usb_hw->ints;
     uint32_t handled = 0;
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+    uint8_t i;
+    uint32_t parked_eps;
+    struct hw_endpoint *ep;
+#endif
 
     if (status & USB_INTF_DEV_SOF_BITS)
     {
       handled |= USB_INTF_DEV_SOF_BITS;
 
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+      hw_endpoint_lock_update(1);
+      parked_eps = (uint32_t)pending_nonperiodic_xfer;
+      last_sof = time_us_32();
+
+      // Kick any deferred nonperiodic IN endpoints
+      for (i = 0; parked_eps && i < USB_MAX_ENDPOINTS; i++) {
+        if (parked_eps & (1u << i)) {
+          parked_eps &= ~(1u << i);
+          ep = hw_endpoint_get_by_num(i, TUSB_DIR_IN);
+          hw_endpoint_start_next_buffer(ep);
+        }
+      }
+      pending_nonperiodic_xfer = 0;
+      hw_endpoint_lock_update(-1);
+#endif
       // disable SOF interrupt if it is used for RESUME in remote wakeup
       if (!_sof_enable) usb_hw_clear->inte = USB_INTS_DEV_SOF_BITS;
 
@@ -444,6 +465,12 @@ void dcd_sof_enable(uint8_t rhport, bool en)
 
   _sof_enable = en;
 
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+  if (pending_nonperiodic_xfer) {
+      // SOF has been set active, don't interfere with it until the next interrupt occurs.
+      return;
+  }
+#endif
   if (en)
   {
     usb_hw_set->inte = USB_INTS_DEV_SOF_BITS;

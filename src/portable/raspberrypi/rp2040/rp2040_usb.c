@@ -38,6 +38,11 @@ const char *ep_dir_string[] = {
         "in",
 };
 
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+volatile uint32_t last_sof = 0;
+volatile uint16_t pending_nonperiodic_xfer = 0;
+#endif
+
 critical_section_t ep_lock;
 
 static void _hw_endpoint_xfer_sync(struct hw_endpoint *ep);
@@ -51,6 +56,35 @@ TU_ATTR_ALWAYS_INLINE static inline bool is_host_mode(void)
 //--------------------------------------------------------------------+
 //
 //--------------------------------------------------------------------+
+
+uint32_t rp2040_critical_frame_period(struct hw_endpoint *ep)
+{
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+  uint32_t delta;
+
+  if (usb_hw->main_ctrl & USB_MAIN_CTRL_HOST_NDEVICE_BITS)
+    return 0;
+
+  if (tu_edpt_dir(ep->ep_addr) == TUSB_DIR_OUT ||
+      ep->transfer_type == TUSB_XFER_INTERRUPT ||
+      ep->transfer_type == TUSB_XFER_ISOCHRONOUS)
+    return 0;
+
+  /* Avoid the last 200us (uframe 6.5-7) of a frame, up to the EOF2 point.
+   * The device state machine cannot recover from receiving an incorrect PID
+   * when it is expecting an ACK.
+   */
+  delta = time_us_32() - last_sof;
+  if (delta < 800 || delta > 998) {
+    return 0;
+  }
+  TU_LOG(3, "Avoiding sof %u now %lu last %lu\n", (usb_hw->sof_rd + 1) & USB_SOF_RD_BITS, now, last_sof);
+  return 1;
+#else
+  (void)ep;
+  return 0;
+#endif
+}
 
 void rp2040_usb_init(void)
 {
@@ -215,7 +249,14 @@ void hw_endpoint_xfer_start(struct hw_endpoint *ep, uint8_t *buffer, uint16_t to
   ep->active        = true;
   ep->user_buf      = buffer;
 
-  hw_endpoint_start_next_buffer(ep);
+  if(!rp2040_critical_frame_period(ep)) {
+    hw_endpoint_start_next_buffer(ep);
+  } else {
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+    pending_nonperiodic_xfer |= (uint16_t)(1 << tu_edpt_number(ep->ep_addr));
+    usb_hw_set->inte = USB_INTS_DEV_SOF_BITS;
+#endif
+  }
   hw_endpoint_lock_update(-1);
 }
 
@@ -331,7 +372,14 @@ bool __tusb_irq_path_func(hw_endpoint_xfer_continue)(struct hw_endpoint *ep)
   }
   else
   {
-    hw_endpoint_start_next_buffer(ep);
+    if(!rp2040_critical_frame_period(ep)) {
+      hw_endpoint_start_next_buffer(ep);
+    } else {
+#if TUD_OPT_RP2040_USB_DEVICE_UFRAME_FIX
+      pending_nonperiodic_xfer |= (uint16_t)(1 << tu_edpt_number(ep->ep_addr));
+      usb_hw_set->inte = USB_INTS_DEV_SOF_BITS;
+#endif
+    }
   }
 
   hw_endpoint_lock_update(-1);
